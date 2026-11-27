@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 from typing import Optional
 
 import libtmux
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 
@@ -69,6 +72,14 @@ def get_session(name: str):
     return matches[0]
 
 
+def get_window(session_name: str, idx: int):
+    sess = get_session(session_name)
+    wins = sess.windows.filter(window_index=str(idx))
+    if not wins:
+        raise HTTPException(404, f"window {idx} not found in session {session_name!r}")
+    return wins[0]
+
+
 def resolve_pane(target: str):
     """Resolve `%id` or `session:window.pane` to a libtmux Pane."""
     if target.startswith("%"):
@@ -101,10 +112,26 @@ class CreateSession(BaseModel):
     height: Optional[int] = None
 
 
+class CreateWindow(BaseModel):
+    name: Optional[str] = None
+    command: Optional[str] = None
+
+
 class SendInput(BaseModel):
     keys: str
     literal: bool = False
     enter: bool = False
+
+
+class SplitPane(BaseModel):
+    vertical: bool = False
+    command: Optional[str] = None
+    size: Optional[int] = None
+
+
+class ResizePane(BaseModel):
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 @app.get("/")
@@ -117,9 +144,16 @@ def root():
             "GET    /sessions/{name}",
             "DELETE /sessions/{name}",
             "GET    /sessions/{name}/windows",
+            "POST   /sessions/{name}/windows        {name?, command?}",
+            "DELETE /sessions/{name}/windows/{idx}",
+            "POST   /sessions/{name}/windows/{idx}/select",
             "GET    /sessions/{name}/windows/{idx}/panes",
             "GET    /panes/{target}/output?lines=N",
             "POST   /panes/{target}/input   {keys, literal?, enter?}",
+            "POST   /panes/{target}/split   {vertical?, command?, size?}",
+            "DELETE /panes/{target}",
+            "POST   /panes/{target}/resize  {width?, height?}",
+            "GET    /panes/{target}/stream?poll_ms=100  (SSE)",
         ],
     }
 
@@ -165,11 +199,34 @@ def session_windows(name: str):
 
 @app.get("/sessions/{name}/windows/{idx}/panes")
 def window_panes(name: str, idx: int):
-    s = get_session(name)
-    wins = s.windows.filter(window_index=str(idx))
-    if not wins:
-        raise HTTPException(404, f"window {idx} not found in session {name!r}")
-    return [pane_dict(p) for p in wins[0].panes]
+    w = get_window(name, idx)
+    return [pane_dict(p) for p in w.panes]
+
+
+@app.post("/sessions/{name}/windows", status_code=201)
+def window_create(name: str, body: CreateWindow):
+    sess = get_session(name)
+    kwargs: dict = {}
+    if body.name:
+        kwargs["window_name"] = body.name
+    if body.command:
+        kwargs["window_shell"] = body.command
+    w = sess.new_window(**kwargs)
+    return window_dict(w)
+
+
+@app.delete("/sessions/{name}/windows/{idx}")
+def window_delete(name: str, idx: int):
+    w = get_window(name, idx)
+    w.kill()
+    return {"ok": True}
+
+
+@app.post("/sessions/{name}/windows/{idx}/select")
+def window_select(name: str, idx: int):
+    w = get_window(name, idx)
+    w.select()
+    return {"ok": True}
 
 
 @app.get("/panes/{target}/output")
@@ -186,6 +243,61 @@ def pane_input(target: str, body: SendInput):
     pane = resolve_pane(target)
     pane.send_keys(body.keys, literal=body.literal, enter=body.enter)
     return {"ok": True}
+
+
+@app.post("/panes/{target}/split", status_code=201)
+def pane_split(target: str, body: SplitPane):
+    pane = resolve_pane(target)
+    kwargs: dict = {"vertical": body.vertical}
+    if body.command:
+        kwargs["shell"] = body.command
+    if body.size:
+        kwargs["size"] = body.size
+    new_pane = pane.split(**kwargs)
+    return pane_dict(new_pane)
+
+
+@app.delete("/panes/{target}")
+def pane_delete(target: str):
+    pane = resolve_pane(target)
+    pane.kill()
+    return {"ok": True}
+
+
+@app.post("/panes/{target}/resize")
+def pane_resize(target: str, body: ResizePane):
+    pane = resolve_pane(target)
+    if body.width:
+        pane.resize(width=body.width)
+    if body.height:
+        pane.resize(height=body.height)
+    return pane_dict(pane)
+
+
+async def _stream_pane_output(target: str, poll_ms: int = 100):
+    """Generator that yields SSE events when pane output changes."""
+    pane = resolve_pane(target)
+    last_output = ""
+    while True:
+        out = pane.capture_pane()
+        if isinstance(out, list):
+            out = "\n".join(out)
+        if out != last_output:
+            new_content = out[len(last_output):] if out.startswith(last_output) else out
+            event = {"type": "output", "content": new_content}
+            yield f"data: {json.dumps(event)}\n\n"
+            last_output = out
+        await asyncio.sleep(poll_ms / 1000)
+
+
+@app.get("/panes/{target}/stream")
+async def pane_stream(target: str, poll_ms: int = 100):
+    resolve_pane(target)
+    return StreamingResponse(
+        _stream_pane_output(target, poll_ms),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def main():
