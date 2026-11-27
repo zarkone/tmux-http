@@ -69,6 +69,14 @@ def get_session(name: str):
     return matches[0]
 
 
+def get_window(session_name: str, idx: int):
+    sess = get_session(session_name)
+    wins = sess.windows.filter(window_index=str(idx))
+    if not wins:
+        raise HTTPException(404, f"window {idx} not found in session {session_name!r}")
+    return wins[0]
+
+
 def resolve_pane(target: str):
     """Resolve `%id` or `session:window.pane` to a libtmux Pane."""
     if target.startswith("%"):
@@ -107,6 +115,10 @@ class SendInput(BaseModel):
     enter: bool = False
 
 
+class Rename(BaseModel):
+    new_name: str
+
+
 @app.get("/")
 def root():
     return {
@@ -116,8 +128,10 @@ def root():
             "POST   /sessions               {name, command?, width?, height?}",
             "GET    /sessions/{name}",
             "DELETE /sessions/{name}",
+            "POST   /sessions/{name}/rename {new_name}",
             "GET    /sessions/{name}/windows",
             "GET    /sessions/{name}/windows/{idx}/panes",
+            "POST   /sessions/{name}/windows/{idx}/rename {new_name}",
             "GET    /panes/{target}/output?lines=N",
             "POST   /panes/{target}/input   {keys, literal?, enter?}",
         ],
@@ -157,6 +171,15 @@ def session_delete(name: str):
     return {"ok": True}
 
 
+@app.post("/sessions/{name}/rename")
+def session_rename(name: str, body: Rename):
+    s = get_session(name)
+    if server.sessions.filter(session_name=body.new_name):
+        raise HTTPException(409, f"session {body.new_name!r} already exists")
+    s.rename_session(body.new_name)
+    return session_dict(s)
+
+
 @app.get("/sessions/{name}/windows")
 def session_windows(name: str):
     s = get_session(name)
@@ -165,11 +188,15 @@ def session_windows(name: str):
 
 @app.get("/sessions/{name}/windows/{idx}/panes")
 def window_panes(name: str, idx: int):
-    s = get_session(name)
-    wins = s.windows.filter(window_index=str(idx))
-    if not wins:
-        raise HTTPException(404, f"window {idx} not found in session {name!r}")
-    return [pane_dict(p) for p in wins[0].panes]
+    w = get_window(name, idx)
+    return [pane_dict(p) for p in w.panes]
+
+
+@app.post("/sessions/{name}/windows/{idx}/rename")
+def window_rename(name: str, idx: int, body: Rename):
+    w = get_window(name, idx)
+    w.rename_window(body.new_name)
+    return window_dict(w)
 
 
 @app.get("/panes/{target}/output")
