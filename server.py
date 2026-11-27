@@ -69,6 +69,14 @@ def get_session(name: str):
     return matches[0]
 
 
+def get_window(session_name: str, idx: int):
+    sess = get_session(session_name)
+    wins = sess.windows.filter(window_index=str(idx))
+    if not wins:
+        raise HTTPException(404, f"window {idx} not found in session {session_name!r}")
+    return wins[0]
+
+
 def resolve_pane(target: str):
     """Resolve `%id` or `session:window.pane` to a libtmux Pane."""
     if target.startswith("%"):
@@ -101,6 +109,11 @@ class CreateSession(BaseModel):
     height: Optional[int] = None
 
 
+class CreateWindow(BaseModel):
+    name: Optional[str] = None
+    command: Optional[str] = None
+
+
 class SendInput(BaseModel):
     keys: str
     literal: bool = False
@@ -117,6 +130,9 @@ def root():
             "GET    /sessions/{name}",
             "DELETE /sessions/{name}",
             "GET    /sessions/{name}/windows",
+            "POST   /sessions/{name}/windows        {name?, command?}",
+            "DELETE /sessions/{name}/windows/{idx}",
+            "POST   /sessions/{name}/windows/{idx}/select",
             "GET    /sessions/{name}/windows/{idx}/panes",
             "GET    /panes/{target}/output?lines=N",
             "POST   /panes/{target}/input   {keys, literal?, enter?}",
@@ -165,11 +181,34 @@ def session_windows(name: str):
 
 @app.get("/sessions/{name}/windows/{idx}/panes")
 def window_panes(name: str, idx: int):
-    s = get_session(name)
-    wins = s.windows.filter(window_index=str(idx))
-    if not wins:
-        raise HTTPException(404, f"window {idx} not found in session {name!r}")
-    return [pane_dict(p) for p in wins[0].panes]
+    w = get_window(name, idx)
+    return [pane_dict(p) for p in w.panes]
+
+
+@app.post("/sessions/{name}/windows", status_code=201)
+def window_create(name: str, body: CreateWindow):
+    sess = get_session(name)
+    kwargs: dict = {}
+    if body.name:
+        kwargs["window_name"] = body.name
+    if body.command:
+        kwargs["window_shell"] = body.command
+    w = sess.new_window(**kwargs)
+    return window_dict(w)
+
+
+@app.delete("/sessions/{name}/windows/{idx}")
+def window_delete(name: str, idx: int):
+    w = get_window(name, idx)
+    w.kill()
+    return {"ok": True}
+
+
+@app.post("/sessions/{name}/windows/{idx}/select")
+def window_select(name: str, idx: int):
+    w = get_window(name, idx)
+    w.select()
+    return {"ok": True}
 
 
 @app.get("/panes/{target}/output")

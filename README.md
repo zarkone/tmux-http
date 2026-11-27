@@ -43,6 +43,9 @@ Endpoint summary:
 | GET | `/sessions/{name}` | Session detail with windows |
 | DELETE | `/sessions/{name}` | Kill the named session |
 | GET | `/sessions/{name}/windows` | List windows in a session |
+| POST | `/sessions/{name}/windows` | Create a window — `{name?, command?}` |
+| DELETE | `/sessions/{name}/windows/{idx}` | Kill a window |
+| POST | `/sessions/{name}/windows/{idx}/select` | Select (focus) a window |
 | GET | `/sessions/{name}/windows/{idx}/panes` | List panes in a window |
 | GET | `/panes/{target}/output?lines=N` | Capture last N lines from a pane |
 | POST | `/panes/{target}/input` | Send keys — `{keys, literal?, enter?}` |
